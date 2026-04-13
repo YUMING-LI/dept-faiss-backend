@@ -1,0 +1,12 @@
+flask==3.1.0
+flask-cors==5.0.0
+flask-limiter==3.5.0
+python-dotenv==1.0.1
+langchain-openai==0.3.9
+langchain-community==0.3.19
+langchain-text-splitters==0.3.8
+langchain-core==0.3.51
+openai==1.68.2
+faiss-cpu==1.10.0
+pdfplumber==0.11.4
+gunicorn==23.0.0
