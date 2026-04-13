@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-nurse-faiss-service — 共用 FAISS 向量資料庫服務
+dept-faiss-backend — 共用 FAISS 向量資料庫服務
 
-支援多 project 管理，提供 BM25 路由 + 向量搜尋 API，
+支援多 project 管理，提供純向量搜尋 API（BM25 路由由呼叫方負責），
 以及管理端點（上傳文件、切分、建立索引）。
 
 環境變數
@@ -10,7 +10,6 @@ nurse-faiss-service — 共用 FAISS 向量資料庫服務
 PROJECTS          project 清單，格式：default:index_map.json,icu:icu_index_map.json
 EMBEDDING_MODEL   OpenAI embedding 模型（預設 text-embedding-3-small）
 TOP_K             每個 SOP 回傳的 chunk 數（預設 5）
-ROUTE_TOP_N       BM25 路由選取前 N 個 SOP（預設 3）
 VECTOR_CACHE_MAX  每個 project 最多快取幾個 FAISS index（預設 50）
 CHUNK_SIZE        文字切分大小（預設 500 字元）
 CHUNK_OVERLAP     切分重疊（預設 100 字元）
@@ -24,14 +23,12 @@ import os
 import re
 import io
 import json
-import math
 import shutil
 import hashlib
 import functools
 import hmac
 import logging
 import uuid
-from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple, Optional
 from time import perf_counter
 from datetime import datetime
@@ -68,7 +65,6 @@ _PROJECT_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]{1,64}$')
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 TOP_K = int(os.getenv("TOP_K", "5"))
-ROUTE_TOP_N = int(os.getenv("ROUTE_TOP_N", "3"))
 _VECTOR_CACHE_MAX = int(os.getenv("VECTOR_CACHE_MAX", "50"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
@@ -90,91 +86,13 @@ embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
 
 # =========================
-# BM25 Router
-# =========================
-def tokenize_zh_en(text: str) -> List[str]:
-    if not text:
-        return []
-    t = text.lower()
-    tokens = re.findall(r"[a-z0-9]+", t)
-    zh_seqs = re.findall(r"[\u4e00-\u9fff]+", t)
-    for seq in zh_seqs:
-        tokens.extend(list(seq))
-        if len(seq) >= 2:
-            tokens.extend([seq[i:i + 2] for i in range(len(seq) - 1)])
-    return tokens
-
-
-@dataclass
-class BM25:
-    corpus_tokens: List[List[str]]
-    doc_len: List[int]
-    avgdl: float
-    df: Dict[str, int]
-    idf: Dict[str, float]
-    k1: float = 1.5
-    b: float = 0.75
-
-    @classmethod
-    def build(cls, docs: List[str], k1: float = 1.5, b: float = 0.75) -> "BM25":
-        corpus_tokens = [tokenize_zh_en(d) for d in docs]
-        doc_len = [len(x) for x in corpus_tokens]
-        avgdl = (sum(doc_len) / len(doc_len)) if doc_len else 0.0
-
-        df: Dict[str, int] = {}
-        for toks in corpus_tokens:
-            for term in set(toks):
-                df[term] = df.get(term, 0) + 1
-
-        N = max(1, len(corpus_tokens))
-        idf: Dict[str, float] = {}
-        for term, dfi in df.items():
-            idf[term] = math.log((N - dfi + 0.5) / (dfi + 0.5) + 1.0)
-
-        return cls(
-            corpus_tokens=corpus_tokens,
-            doc_len=doc_len,
-            avgdl=avgdl,
-            df=df,
-            idf=idf,
-            k1=k1,
-            b=b,
-        )
-
-    def score(self, query: str) -> List[float]:
-        q = tokenize_zh_en(query)
-        if not q or not self.corpus_tokens:
-            return [0.0] * len(self.corpus_tokens)
-
-        scores = [0.0] * len(self.corpus_tokens)
-        for i, doc_toks in enumerate(self.corpus_tokens):
-            dl = self.doc_len[i] or 1
-            tf: Dict[str, int] = {}
-            for term in doc_toks:
-                tf[term] = tf.get(term, 0) + 1
-
-            s = 0.0
-            for term in q:
-                if term not in tf:
-                    continue
-                idf_val = self.idf.get(term, 0.0)
-                f = tf[term]
-                denom = f + self.k1 * (1 - self.b + self.b * (dl / (self.avgdl or 1.0)))
-                s += idf_val * (f * (self.k1 + 1)) / (denom or 1e-9)
-            scores[i] = s
-        return scores
-
-
-# =========================
 # Per-project state
 # =========================
 class ProjectState:
     def __init__(self):
         self.index_map: Dict[str, Any] = {}
-        self.bm25_router: Optional[BM25] = None
         self.sop_titles: List[str] = []
         self.vector_cache: Dict[str, FAISS] = {}
-        # 對應的 index_map 檔案路徑
         self.index_map_file: str = ""
 
 
@@ -327,7 +245,6 @@ def _init_project(project_id: str, index_map_file: str) -> ProjectState:
         logger.info("[%s] 補算 %d 筆 SHA256", project_id, sha_updated)
 
     state.sop_titles = list(state.index_map.keys())
-    state.bm25_router = BM25.build(state.sop_titles)
 
     preloaded = 0
     for title in state.sop_titles:
@@ -544,14 +461,12 @@ def list_projects():
 @limiter.limit("60 per minute")
 def search(project_id: str):
     """
-    BM25 路由 + 向量搜尋。
+    向量搜尋（BM25 路由由呼叫方負責）。
 
     Request body:
-        query           (str, required)
-        original        (str, optional) 用於 BM25，預設同 query
-        top_k           (int, optional)
-        route_top_n     (int, optional)
-        route_min_score (float, optional)
+        query     (str, required)
+        sop_keys  (list[str], optional) 指定搜尋範圍；省略時搜尋 project 所有 SOP
+        top_k     (int, optional)
     """
     ensure_state()
 
@@ -561,20 +476,26 @@ def search(project_id: str):
 
     body = request.get_json(silent=True) or {}
     query: str = (body.get("query") or "").strip()
-    original: str = (body.get("original") or query).strip()
     top_k: int = max(1, min(int(body.get("top_k", TOP_K)), 20))
-    route_top_n: int = max(1, min(int(body.get("route_top_n", ROUTE_TOP_N)), 10))
-    route_min_score: float = float(body.get("route_min_score", 0.0))
+    requested_keys: List[str] = body.get("sop_keys") or []
 
     if not query:
         return jsonify({"error": "query 不得為空"}), 400
 
-    t0 = perf_counter()
-    routed_pairs = route_sop_bm25(original, query, state, top_n=route_top_n, min_score=route_min_score)
-    bm25_ms = round((perf_counter() - t0) * 1000, 2)
+    # 決定要搜尋的 SOP title 清單
+    if requested_keys:
+        key_to_title = {
+            (info.get("safe_name") or t): t
+            for t, info in state.index_map.items()
+        }
+        search_titles = [key_to_title[k] for k in requested_keys if k in key_to_title]
+        if not search_titles:
+            return jsonify({"error": "指定的 sop_keys 均不存在於此 project"}), 404
+    else:
+        search_titles = list(state.sop_titles)
 
-    if not routed_pairs:
-        return jsonify({"error": "BM25 路由失敗（index_map 可能為空）"}), 500
+    if not search_titles:
+        return jsonify({"error": "此 project 尚無任何 SOP"}), 404
 
     t1 = perf_counter()
     try:
@@ -586,7 +507,7 @@ def search(project_id: str):
 
     t2 = perf_counter()
     merged: List[Tuple[Any, float, str]] = []
-    for sop_title, _ in routed_pairs:
+    for sop_title in search_titles:
         try:
             vs = get_vectorstore_for_title(sop_title, state)
         except Exception:
@@ -598,15 +519,6 @@ def search(project_id: str):
 
     merged.sort(key=lambda x: x[1])
     top = merged[:top_k]
-
-    routed_resp = []
-    for title, score in routed_pairs:
-        info = state.index_map.get(title) or {}
-        routed_resp.append({
-            "title": title,
-            "sop_key": (info.get("safe_name") or title),
-            "score": float(score),
-        })
 
     chunks = []
     for doc, score, sop_title in top:
@@ -621,14 +533,13 @@ def search(project_id: str):
         })
 
     logger.info(
-        "search project=%s bm25_ms=%s embed_ms=%s search_ms=%s routed=%d chunks=%d",
-        project_id, bm25_ms, embed_ms, search_ms, len(routed_resp), len(chunks),
+        "search project=%s embed_ms=%s search_ms=%s sops=%d chunks=%d",
+        project_id, embed_ms, search_ms, len(search_titles), len(chunks),
     )
 
     return jsonify({
-        "routed": routed_resp,
         "chunks": chunks,
-        "timings": {"bm25_ms": bm25_ms, "embed_ms": embed_ms, "search_ms": search_ms},
+        "timings": {"embed_ms": embed_ms, "search_ms": search_ms},
     })
 
 
@@ -659,7 +570,6 @@ def create_project():
     state.index_map = {}
     state.index_map_file = index_map_file
     state.sop_titles = []
-    state.bm25_router = BM25.build([])
     _projects[project_id] = state
 
     logger.info("建立新 project: %s", project_id)
@@ -790,7 +700,6 @@ def upload_sop(project_id: str):
         "sha256": sha256,
     }
     state.sop_titles = list(state.index_map.keys())
-    state.bm25_router = BM25.build(state.sop_titles)
     state.vector_cache[title] = vs
 
     # 寫回 index_map.json
@@ -838,7 +747,6 @@ def delete_sop(project_id: str, sop_key: str):
     del state.index_map[title]
     state.vector_cache.pop(title, None)
     state.sop_titles = list(state.index_map.keys())
-    state.bm25_router = BM25.build(state.sop_titles)
 
     _save_index_map(project_id)
 
