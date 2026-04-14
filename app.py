@@ -307,48 +307,115 @@ def _make_safe_name(title: str) -> str:
     return f"sop_{suffix}"
 
 
-def _extract_pdf_chunks(
-    file_bytes: bytes,
+def _find_title_by_sop_key(state: "ProjectState", sop_key: str) -> Optional[str]:
+    """從 index_map 中查找 sop_key 對應的 title。"""
+    for t, info in state.index_map.items():
+        if (info.get("safe_name") or t) == sop_key:
+            return t
+    return None
+
+
+# =========================
+# Chunk / Source 管理
+# =========================
+
+def _load_chunks(index_dir: str) -> List[Dict]:
+    """載入 chunks.json；不存在時回傳空清單。"""
+    fp = os.path.join(index_dir, "chunks.json")
+    if not os.path.exists(fp):
+        return []
+    with open(fp, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_chunks(index_dir: str, chunks: List[Dict]) -> None:
+    """原子寫入 chunks.json。"""
+    fp = os.path.join(index_dir, "chunks.json")
+    tmp = fp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(chunks, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, fp)
+
+
+def _load_source(index_dir: str) -> Dict:
+    """載入 source.json；不存在時回傳空 dict。"""
+    fp = os.path.join(index_dir, "source.json")
+    if not os.path.exists(fp):
+        return {}
+    with open(fp, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_source(index_dir: str, source: Dict) -> None:
+    """原子寫入 source.json。"""
+    fp = os.path.join(index_dir, "source.json")
+    tmp = fp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(source, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, fp)
+
+
+def _source_to_chunks(
+    source_data: Dict,
     title: str,
     chunk_size: int,
     chunk_overlap: int,
-) -> List[LCDocument]:
-    """從 PDF bytes 提取文字並切分為 chunks。"""
-    docs: List[LCDocument] = []
+) -> Tuple[List[LCDocument], List[Dict]]:
+    """從 source_data 切分，回傳 (LCDocument list, chunk_dicts list)。"""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", "。", "！", "？", " ", ""],
     )
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
-            if not text.strip():
-                continue
-            for chunk in splitter.split_text(text):
-                docs.append(LCDocument(
-                    page_content=chunk,
-                    metadata={"page": page_num, "sop_title": title},
-                ))
-    return docs
+    lc_docs: List[LCDocument] = []
+    chunk_dicts: List[Dict] = []
+
+    src_type = source_data.get("type")
+    if src_type == "pdf":
+        for page_info in source_data.get("pages", []):
+            page_num = page_info["page"]
+            text = page_info.get("text", "")
+            for c in splitter.split_text(text):
+                meta = {"page": page_num, "sop_title": title}
+                lc_docs.append(LCDocument(page_content=c, metadata=meta))
+                chunk_dicts.append({
+                    "id": str(len(chunk_dicts)),
+                    "content": c,
+                    "page": page_num,
+                    "metadata": meta,
+                })
+    else:
+        text = source_data.get("text", "")
+        for c in splitter.split_text(text):
+            meta = {"sop_title": title}
+            lc_docs.append(LCDocument(page_content=c, metadata=meta))
+            chunk_dicts.append({
+                "id": str(len(chunk_dicts)),
+                "content": c,
+                "page": None,
+                "metadata": meta,
+            })
+    return lc_docs, chunk_dicts
 
 
-def _chunk_text(
-    text: str,
+def _rebuild_faiss_from_chunk_dicts(
+    state: "ProjectState",
     title: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> List[LCDocument]:
-    """切分純文字為 chunks。"""
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", "！", "？", " ", ""],
-    )
-    return [
-        LCDocument(page_content=c, metadata={"sop_title": title})
-        for c in splitter.split_text(text)
+    index_dir: str,
+    chunk_dicts: List[Dict],
+) -> "FAISS":
+    """從 chunk_dicts 重建 FAISS index，清除快取，回傳新 vectorstore。"""
+    docs = [
+        LCDocument(page_content=c["content"], metadata=c.get("metadata") or {})
+        for c in chunk_dicts
     ]
+    if os.path.exists(index_dir):
+        shutil.rmtree(index_dir)
+    os.makedirs(index_dir)
+    vs = FAISS.from_documents(docs, embeddings)
+    vs.save_local(index_dir)
+    state.vector_cache.pop(title, None)
+    return vs
 
 
 # =========================
@@ -652,16 +719,22 @@ def upload_sop(project_id: str):
     if title in state.index_map and not overwrite:
         return jsonify({"error": f"SOP「{title}」已存在，請勾選覆蓋或先刪除"}), 409
 
-    # 提取文字並切分
+    # 提取原始文字並切分
     ext = os.path.splitext(file.filename)[1].lower()
     try:
         if ext == ".pdf":
-            docs = _extract_pdf_chunks(file_bytes, title, chunk_size, chunk_overlap)
+            source_data: Dict = {"type": "pdf", "pages": []}
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        source_data["pages"].append({"page": page_num, "text": text})
         elif ext in (".txt", ".md"):
-            text = file_bytes.decode("utf-8", errors="ignore")
-            docs = _chunk_text(text, title, chunk_size, chunk_overlap)
+            source_data = {"type": "text", "text": file_bytes.decode("utf-8", errors="ignore")}
         else:
             return jsonify({"error": "僅支援 PDF、TXT、MD 格式"}), 400
+
+        docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
     except Exception as e:
         logger.exception("文字提取失敗 project=%s title=%s", project_id, title)
         return jsonify({"error": f"文字提取失敗：{e}"}), 500
@@ -685,6 +758,8 @@ def upload_sop(project_id: str):
         os.makedirs(index_dir)
         vs = FAISS.from_documents(docs, embeddings)
         vs.save_local(index_dir)
+        _save_source(index_dir, source_data)
+        _save_chunks(index_dir, chunk_dicts)
     except Exception as e:
         logger.exception("建立 FAISS index 失敗 project=%s title=%s", project_id, title)
         return jsonify({"error": f"建立向量索引失敗：{e}"}), 500
@@ -696,8 +771,10 @@ def upload_sop(project_id: str):
     state.index_map[title] = {
         "safe_name": safe_name,
         "index_path": rel_path,
-        "num_chunks": len(docs),
+        "num_chunks": len(chunk_dicts),
         "sha256": sha256,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
     }
     state.sop_titles = list(state.index_map.keys())
     state.vector_cache[title] = vs
@@ -714,6 +791,143 @@ def upload_sop(project_id: str):
     })
 
 
+@app.get("/api/projects/<project_id>/sops/<sop_key>/chunks")
+def get_sop_chunks(project_id: str, sop_key: str):
+    """列出指定 SOP 的所有 chunks（支援 offset/limit 分頁）。"""
+    ensure_state()
+    state = _projects.get(project_id)
+    if not state:
+        return jsonify({"error": f"project '{project_id}' 不存在"}), 404
+
+    title = _find_title_by_sop_key(state, sop_key)
+    if not title:
+        return jsonify({"error": f"SOP '{sop_key}' 不存在"}), 404
+
+    info = state.index_map[title]
+    index_dir = abspath_from_base(info.get("index_path", ""))
+    all_chunks = _load_chunks(index_dir)
+
+    offset = max(0, int(request.args.get("offset", 0)))
+    limit = max(1, min(int(request.args.get("limit", 200)), 500))
+    page_chunks = all_chunks[offset: offset + limit]
+
+    return jsonify({
+        "project_id": project_id,
+        "sop_key": sop_key,
+        "title": title,
+        "total": len(all_chunks),
+        "offset": offset,
+        "limit": limit,
+        "chunk_size": info.get("chunk_size", CHUNK_SIZE),
+        "chunk_overlap": info.get("chunk_overlap", CHUNK_OVERLAP),
+        "chunks": page_chunks,
+    })
+
+
+@app.delete("/api/admin/projects/<project_id>/sops/<sop_key>/chunks/<chunk_id>")
+@require_api_key
+def delete_chunk(project_id: str, sop_key: str, chunk_id: str):
+    """刪除單一 chunk 並重建 FAISS index。"""
+    ensure_state()
+    state = _projects.get(project_id)
+    if not state:
+        return jsonify({"error": f"project '{project_id}' 不存在"}), 404
+
+    title = _find_title_by_sop_key(state, sop_key)
+    if not title:
+        return jsonify({"error": f"SOP '{sop_key}' 不存在"}), 404
+
+    info = state.index_map[title]
+    index_dir = abspath_from_base(info.get("index_path", ""))
+    chunks = _load_chunks(index_dir)
+
+    new_chunks = [c for c in chunks if c["id"] != chunk_id]
+    if len(new_chunks) == len(chunks):
+        return jsonify({"error": f"chunk '{chunk_id}' 不存在"}), 404
+    if not new_chunks:
+        return jsonify({"error": "無法刪除最後一個 chunk，請直接刪除整個 SOP"}), 400
+
+    try:
+        _rebuild_faiss_from_chunk_dicts(state, title, index_dir, new_chunks)
+    except Exception as e:
+        logger.exception("重建 FAISS index 失敗 project=%s sop_key=%s", project_id, sop_key)
+        return jsonify({"error": f"重建索引失敗：{e}"}), 500
+
+    # 重新指派連續 id
+    for i, c in enumerate(new_chunks):
+        c["id"] = str(i)
+    _save_chunks(index_dir, new_chunks)
+
+    sha256 = _compute_faiss_index_sha256(index_dir)
+    info["num_chunks"] = len(new_chunks)
+    info["sha256"] = sha256
+    _save_index_map(project_id)
+
+    logger.info("刪除 chunk project=%s sop_key=%s chunk_id=%s 剩餘=%d", project_id, sop_key, chunk_id, len(new_chunks))
+    return jsonify({"ok": True, "num_chunks": len(new_chunks)})
+
+
+@app.post("/api/admin/projects/<project_id>/sops/<sop_key>/rechunk")
+@require_api_key
+def rechunk_sop(project_id: str, sop_key: str):
+    """以新切分參數重建 FAISS index（需有 source.json）。"""
+    ensure_state()
+    state = _projects.get(project_id)
+    if not state:
+        return jsonify({"error": f"project '{project_id}' 不存在"}), 404
+
+    title = _find_title_by_sop_key(state, sop_key)
+    if not title:
+        return jsonify({"error": f"SOP '{sop_key}' 不存在"}), 404
+
+    info = state.index_map[title]
+    index_dir = abspath_from_base(info.get("index_path", ""))
+    source_data = _load_source(index_dir)
+    if not source_data:
+        return jsonify({"error": "找不到原始文字（source.json），請重新上傳文件"}), 404
+
+    body = request.get_json(silent=True) or {}
+    chunk_size = max(100, int(body.get("chunk_size", info.get("chunk_size", CHUNK_SIZE))))
+    chunk_overlap = max(0, int(body.get("chunk_overlap", info.get("chunk_overlap", CHUNK_OVERLAP))))
+    if chunk_overlap >= chunk_size:
+        return jsonify({"error": "chunk_overlap 必須小於 chunk_size"}), 400
+
+    try:
+        docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
+    except Exception as e:
+        return jsonify({"error": f"切分失敗：{e}"}), 500
+
+    if not chunk_dicts:
+        return jsonify({"error": "切分結果為空"}), 400
+
+    try:
+        _rebuild_faiss_from_chunk_dicts(state, title, index_dir, chunk_dicts)
+    except Exception as e:
+        logger.exception("重建 FAISS index 失敗 project=%s sop_key=%s", project_id, sop_key)
+        return jsonify({"error": f"重建索引失敗：{e}"}), 500
+
+    _save_chunks(index_dir, chunk_dicts)
+    _save_source(index_dir, source_data)
+
+    sha256 = _compute_faiss_index_sha256(index_dir)
+    info["num_chunks"] = len(chunk_dicts)
+    info["sha256"] = sha256
+    info["chunk_size"] = chunk_size
+    info["chunk_overlap"] = chunk_overlap
+    _save_index_map(project_id)
+
+    logger.info(
+        "重新切分 project=%s sop_key=%s chunk_size=%d overlap=%d chunks=%d",
+        project_id, sop_key, chunk_size, chunk_overlap, len(chunk_dicts),
+    )
+    return jsonify({
+        "ok": True,
+        "num_chunks": len(chunk_dicts),
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+    })
+
+
 @app.delete("/api/admin/projects/<project_id>/sops/<sop_key>")
 @require_api_key
 def delete_sop(project_id: str, sop_key: str):
@@ -724,13 +938,7 @@ def delete_sop(project_id: str, sop_key: str):
     if state is None:
         return jsonify({"error": f"project '{project_id}' 不存在"}), 404
 
-    # 找 title
-    title = None
-    for t, info in state.index_map.items():
-        if (info.get("safe_name") or t) == sop_key:
-            title = t
-            break
-
+    title = _find_title_by_sop_key(state, sop_key)
     if title is None:
         return jsonify({"error": f"SOP '{sop_key}' 不存在"}), 404
 
