@@ -1,0 +1,152 @@
+{
+  "D2-024-A化療藥物潑灑意外處理辦法(第十五版)": {
+    "safe_name": "sop_ecac90a66af6",
+    "index_path": "faiss_index_store/sop_ecac90a66af6",
+    "num_chunks": 8
+  },
+  "L1-016-A預防病人跌倒及降低傷害程度管理政策(第二十二版)": {
+    "safe_name": "sop_92ec32417f9e",
+    "index_path": "faiss_index_store/sop_92ec32417f9e",
+    "num_chunks": 12
+  },
+  "L2-021-A管制藥品管理辦法(第十九版)": {
+    "safe_name": "sop_54bae79525e1",
+    "index_path": "faiss_index_store/sop_54bae79525e1",
+    "num_chunks": 3
+  },
+  "L2-045-A急救車管理辦法(第二十一版)": {
+    "safe_name": "sop_9ae13c7bf000",
+    "index_path": "faiss_index_store/sop_9ae13c7bf000",
+    "num_chunks": 1
+  },
+  "L2-090-A病人辨識管理辦法(第十五版)2025檢視": {
+    "safe_name": "sop_81864a678d0b",
+    "index_path": "faiss_index_store/sop_81864a678d0b",
+    "num_chunks": 3
+  },
+  "L2-107-A病人運送作業辦法(第十七版)": {
+    "safe_name": "sop_23e16e6a5f9d",
+    "index_path": "faiss_index_store/sop_23e16e6a5f9d",
+    "num_chunks": 7
+  },
+  "L2-184-A手部衛生作業辦法(第十二版)": {
+    "safe_name": "sop_10e7093525db",
+    "index_path": "faiss_index_store/sop_10e7093525db",
+    "num_chunks": 12
+  },
+  "LAA-001生命徵象測量護理業務作業準則": {
+    "safe_name": "sop_24b9d490e514",
+    "index_path": "faiss_index_store/sop_24b9d490e514",
+    "num_chunks": 6
+  },
+  "LAA-006週邊置入中心靜脈導管換藥護理業務作業準則": {
+    "safe_name": "sop_b6c266e77deb",
+    "index_path": "faiss_index_store/sop_b6c266e77deb",
+    "num_chunks": 12
+  },
+  "LAA-023病人約束護理業務作業準則": {
+    "safe_name": "sop_70449dd07a9c",
+    "index_path": "faiss_index_store/sop_70449dd07a9c",
+    "num_chunks": 10
+  },
+  "LAA-028給藥護理業務作業準則": {
+    "safe_name": "sop_09c79dc00c98",
+    "index_path": "faiss_index_store/sop_09c79dc00c98",
+    "num_chunks": 13
+  },
+  "LAA-030靜脈灌注護理業務作業準則": {
+    "safe_name": "sop_296605e9a67d",
+    "index_path": "faiss_index_store/sop_296605e9a67d",
+    "num_chunks": 12
+  },
+  "LAA-033肌肉注射護理業務作業準則": {
+    "safe_name": "sop_b58c635f4fd9",
+    "index_path": "faiss_index_store/sop_b58c635f4fd9",
+    "num_chunks": 6
+  },
+  "LAA-034胰島素注射護理業務作業準則": {
+    "safe_name": "sop_2e82a9529b64",
+    "index_path": "faiss_index_store/sop_2e82a9529b64",
+    "num_chunks": 12
+  },
+  "LAA-037備、輸血護理業務作業準則": {
+    "safe_name": "sop_2cb5fb3b6d5f",
+    "index_path": "faiss_index_store/sop_2cb5fb3b6d5f",
+    "num_chunks": 15
+  },
+  "LAA-038植入式注射座輸液護理業務作業準則": {
+    "safe_name": "sop_4c513033f4e4",
+    "index_path": "faiss_index_store/sop_4c513033f4e4",
+    "num_chunks": 13
+  },
+  "LAA-039鼻胃管灌食護理業務作業準則": {
+    "safe_name": "sop_088f9578f62d",
+    "index_path": "faiss_index_store/sop_088f9578f62d",
+    "num_chunks": 9
+  },
+  "LAA-042留置導尿管護理業務作業準則": {
+    "safe_name": "sop_9f4a71906344",
+    "index_path": "faiss_index_store/sop_9f4a71906344",
+    "num_chunks": 14
+  },
+  "LAA-052抽痰護理業務作業準則": {
+    "safe_name": "sop_a42c1b1ac3ed",
+    "index_path": "faiss_index_store/sop_a42c1b1ac3ed",
+    "num_chunks": 8
+  },
+  "LAA-053換藥護理業務作業準則": {
+    "safe_name": "sop_63acc79939b1",
+    "index_path": "faiss_index_store/sop_63acc79939b1",
+    "num_chunks": 7
+  },
+  "LAA-059心肺腦甦醒術護理業務作業準則": {
+    "safe_name": "sop_d51e199b07f6",
+    "index_path": "faiss_index_store/sop_d51e199b07f6",
+    "num_chunks": 10
+  },
+  "LAA-062_疾病末期善終照護作業準則": {
+    "safe_name": "sop_e7018117675c",
+    "index_path": "faiss_index_store/sop_e7018117675c",
+    "num_chunks": 7
+  },
+  "LAA-063手術前護理業務作業準則": {
+    "safe_name": "sop_56e67f1a6077",
+    "index_path": "faiss_index_store/sop_56e67f1a6077",
+    "num_chunks": 22
+  },
+  "LAA-066-A化學治療給藥護理業務作業準則": {
+    "safe_name": "sop_b66da129499e",
+    "index_path": "faiss_index_store/sop_b66da129499e",
+    "num_chunks": 24
+  },
+  "LCA-003氣切造口護理業務作業準則": {
+    "safe_name": "sop_fd1c12a256d1",
+    "index_path": "faiss_index_store/sop_fd1c12a256d1",
+    "num_chunks": 9
+  },
+  "LCA-006協助中心靜脈導管放置及及移除作業準則": {
+    "safe_name": "sop_e4494262e158",
+    "index_path": "faiss_index_store/sop_e4494262e158",
+    "num_chunks": 11
+  },
+  "LFA-001採血法作業準則": {
+    "safe_name": "sop_8e15d9d824d4",
+    "index_path": "faiss_index_store/sop_8e15d9d824d4",
+    "num_chunks": 8
+  },
+  "LHA-023護理部化療藥物外滲處理作業準則": {
+    "safe_name": "sop_fac0aa53c6dc",
+    "index_path": "faiss_index_store/sop_fac0aa53c6dc",
+    "num_chunks": 5
+  },
+  "N3-015護理人員交班及轉床作業準則_": {
+    "safe_name": "sop_04f850b30ba8",
+    "index_path": "faiss_index_store/sop_04f850b30ba8",
+    "num_chunks": 7
+  },
+  "N3-034-護理急救用物(電擊器及急救車)定位作業準則": {
+    "safe_name": "sop_ddfb56ca3041",
+    "index_path": "faiss_index_store/sop_ddfb56ca3041",
+    "num_chunks": 7
+  }
+}
