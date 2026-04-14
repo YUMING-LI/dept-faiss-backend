@@ -30,11 +30,16 @@ jobs:
 
 - job: RunOnStagingAgent
   displayName: "Run rebuild (staging)"
-  condition: eq(variables['Build.SourceBranch'], 'refs/heads/staging')
+  dependsOn: DeployPrimary
   pool:
     name: uxshdap01
     demands:
       - agent.name -equals uxshdap03
+  condition: |
+    or(
+      eq(variables['Build.SourceBranch'], 'refs/heads/staging'),
+      and(succeeded('DeployPrimary'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    )
   steps:
   - script: docker compose up -d --build
     displayName: 'Run rebuild (staging)'
