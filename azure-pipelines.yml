@@ -21,7 +21,7 @@ jobs:
   displayName: "Run rebuild (dev)"
   condition: eq(variables['Build.SourceBranch'], 'refs/heads/dev')
   pool:
-    name: uxshdap01
+    name: uxshdap02
     demands:
       - agent.name -equals uxshdap02
   steps:
@@ -32,7 +32,7 @@ jobs:
   displayName: "Run rebuild (staging)"
   condition: eq(variables['Build.SourceBranch'], 'refs/heads/staging')
   pool:
-    name: uxshdap01
+    name: uxshdap03
     demands:
       - agent.name -equals uxshdap03
   steps:
