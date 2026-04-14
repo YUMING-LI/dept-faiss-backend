@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-dept-faiss-backend — 共用 FAISS 向量資料庫服務
+ihd-faiss-backend — 共用 FAISS 向量資料庫服務
 
 支援多 project 管理，提供純向量搜尋 API（BM25 路由由呼叫方負責），
 以及管理端點（上傳文件、切分、建立索引）。
@@ -80,7 +80,7 @@ logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("dept-faiss-service")
+logger = logging.getLogger("ihd-faiss-service")
 
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
@@ -504,17 +504,17 @@ def require_api_key(f):
 # 前端靜態檔案
 # =========================
 @app.get("/")
-@app.get("/dept-faiss")
-@app.get("/dept-faiss/")
+@app.get("/ihd-faiss")
+@app.get("/ihd-faiss/")
 def serve_frontend():
-    """回傳管理前端（本地開發用；生產環境由 dept-faiss-fronted 容器提供）。"""
+    """回傳管理前端（本地開發用；生產環境由 ihd-faiss-fronted 容器提供）。"""
     static_dir = os.path.join(BASE_DIR, "static")
     if os.path.exists(os.path.join(static_dir, "index.html")):
         return send_from_directory(static_dir, "index.html")
-    return jsonify({"message": "dept-faiss-backend is running. Frontend not deployed yet."}), 200
+    return jsonify({"message": "ihd-faiss-backend is running. Frontend not deployed yet."}), 200
 
 
-@app.get("/dept-faiss/<path:filename>")
+@app.get("/ihd-faiss/<path:filename>")
 def serve_frontend_assets(filename):
     return send_from_directory(os.path.join(BASE_DIR, "static"), filename)
 

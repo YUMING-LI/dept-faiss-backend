@@ -17,9 +17,9 @@ No linter or test runner is configured.
 
 ## Docker / Deployment
 
-- **Container name**: `dept-faiss-backend`
+- **Container name**: `ihd-faiss-backend`
 - **Docker network**: `shdnetwork` (external)
-- **env_file**: `/home/shduser/Docker_static/dept-faiss-backend/.env`
+- **env_file**: `/home/shduser/Docker_static/ihd-faiss-backend/.env`
 - **Port**: exposes 80 (no host binding)
 - **WSGI**: `gunicorn --workers 2 --timeout 180`
 - **Healthcheck**: `curl /api/health`
