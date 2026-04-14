@@ -9,14 +9,6 @@ services:
     container_name: dept-faiss-backend
     env_file:
       - /home/shduser/Docker_static/dept-faiss-backend/.env
-    environment:
-      # PROJECTS 格式：project_id:index_map_file，多個用逗號分隔
-      # 例：default:index_map.json,icu:icu_index_map.json
-      - PROJECTS=default:index_map.json
-      # API 認證（建議設定，留空則停用）
-      - API_TOKEN=
-      # CORS 白名單（多個用逗號分隔）
-      - ALLOWED_ORIGINS=
     networks:
       web:
         aliases:

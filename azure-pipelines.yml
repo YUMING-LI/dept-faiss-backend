@@ -1,0 +1,45 @@
+trigger:
+  branches:
+    include:
+      - main
+      - dev
+      - staging
+
+jobs:
+- job: DeployPrimary
+  displayName: "Deploy to Primary Host"
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  pool:
+    name: uxshdap01
+    demands:
+      - agent.name -equals uxshdap01
+  steps:
+  - script: docker compose up -d --build
+    displayName: 'Deploy to Primary Host'
+
+- job: RunOnDevAgent
+  displayName: "Run rebuild (dev)"
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/dev')
+  pool:
+    name: uxshdap01
+    demands:
+      - agent.name -equals uxshdap02
+  steps:
+  - script: docker compose up -d --build
+    displayName: 'Run rebuild (dev)'
+
+- job: RunOnStagingAgent
+  displayName: "Run rebuild (staging)"
+  dependsOn: DeployPrimary
+  pool:
+    name: uxshdap01
+    demands:
+      - agent.name -equals uxshdap03
+  condition: |
+    or(
+      eq(variables['Build.SourceBranch'], 'refs/heads/staging'),
+      and(succeeded('DeployPrimary'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    )
+  steps:
+  - script: docker compose up -d --build
+    displayName: 'Run rebuild (staging)'
