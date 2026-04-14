@@ -475,17 +475,17 @@ def require_api_key(f):
 # 前端靜態檔案
 # =========================
 @app.get("/")
-@app.get("/admin")
-@app.get("/admin/")
+@app.get("/dept-faiss/admin")
+@app.get("/dept-faiss/admin/")
 def serve_frontend():
-    """回傳管理前端（需 static/index.html 存在）。"""
+    """回傳管理前端（本地開發用；生產環境由 dept-faiss-fronted 容器提供）。"""
     static_dir = os.path.join(BASE_DIR, "static")
     if os.path.exists(os.path.join(static_dir, "index.html")):
         return send_from_directory(static_dir, "index.html")
-    return jsonify({"message": "nurse-faiss-service is running. Frontend not deployed yet."}), 200
+    return jsonify({"message": "dept-faiss-backend is running. Frontend not deployed yet."}), 200
 
 
-@app.get("/admin/<path:filename>")
+@app.get("/dept-faiss/admin/<path:filename>")
 def serve_frontend_assets(filename):
     return send_from_directory(os.path.join(BASE_DIR, "static"), filename)
 
