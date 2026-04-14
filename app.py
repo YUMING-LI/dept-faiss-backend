@@ -31,7 +31,7 @@ import logging
 import uuid
 from typing import Dict, Any, List, Tuple, Optional
 from time import perf_counter
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pdfplumber
 from dotenv import load_dotenv
@@ -80,7 +80,7 @@ logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("nurse-faiss-service")
+logger = logging.getLogger("dept-faiss-service")
 
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
@@ -136,7 +136,7 @@ def _verify_faiss_index_sha256(index_dir: str, expected: str) -> None:
     logger.info("FAISS index SHA256 驗證通過：%s", index_dir)
 
 
-def get_vectorstore_for_title(title: str, state: ProjectState) -> FAISS:
+def get_vectorstore_for_title(title: str, state: ProjectState, skip_verify: bool = False) -> FAISS:
     if title in state.vector_cache:
         return state.vector_cache[title]
 
@@ -154,14 +154,15 @@ def get_vectorstore_for_title(title: str, state: ProjectState) -> FAISS:
     if not os.path.exists(index_path):
         raise FileNotFoundError(f"找不到 FAISS index：{index_path}")
 
-    expected_sha256 = (info.get("sha256") or "").strip().lower()
-    if expected_sha256:
-        _verify_faiss_index_sha256(index_path, expected_sha256)
-    else:
-        logger.warning(
-            "SECURITY: FAISS index '%s' 未設定 sha256 驗證，存在反序列化攻擊風險。",
-            index_path,
-        )
+    if not skip_verify:
+        expected_sha256 = (info.get("sha256") or "").strip().lower()
+        if expected_sha256:
+            _verify_faiss_index_sha256(index_path, expected_sha256)
+        else:
+            logger.warning(
+                "SECURITY: FAISS index '%s' 未設定 sha256 驗證，存在反序列化攻擊風險。",
+                index_path,
+            )
 
     vs = FAISS.load_local(
         index_path,
@@ -174,26 +175,6 @@ def get_vectorstore_for_title(title: str, state: ProjectState) -> FAISS:
     return vs
 
 
-# =========================
-# BM25 Routing
-# =========================
-def route_sop_bm25(
-    original: str,
-    optimized: str,
-    state: ProjectState,
-    top_n: int = ROUTE_TOP_N,
-    min_score: float = 0.0,
-) -> List[Tuple[str, float]]:
-    if not state.bm25_router or not state.sop_titles:
-        return []
-    scores_orig = state.bm25_router.score(original)
-    scores_opt = state.bm25_router.score(optimized)
-    scores = [max(a, b) for a, b in zip(scores_orig, scores_opt)]
-    pairs = list(zip(state.sop_titles, scores))
-    pairs.sort(key=lambda x: x[1], reverse=True)
-    top = pairs[:max(3, top_n)]
-    filtered = [(t, s) for t, s in top if s > min_score]
-    return filtered if filtered else top
 
 
 # =========================
@@ -249,7 +230,7 @@ def _init_project(project_id: str, index_map_file: str) -> ProjectState:
     preloaded = 0
     for title in state.sop_titles:
         try:
-            get_vectorstore_for_title(title, state)
+            get_vectorstore_for_title(title, state, skip_verify=True)
             preloaded += 1
         except Exception:
             logger.warning("[%s] 預載 FAISS 索引失敗: %s", project_id, title, exc_info=True)
@@ -260,16 +241,43 @@ def _init_project(project_id: str, index_map_file: str) -> ProjectState:
 
 _state_initialized = False
 
+_DYNAMIC_PROJECTS_FILE = os.path.join(BASE_DIR, "dynamic_projects.json")
+
+
+def _load_dynamic_projects() -> Dict[str, str]:
+    """讀取 runtime 建立的 project 清單（{project_id: index_map_file}）。"""
+    if not os.path.exists(_DYNAMIC_PROJECTS_FILE):
+        return {}
+    try:
+        with open(_DYNAMIC_PROJECTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.warning("無法讀取 dynamic_projects.json，略過")
+        return {}
+
+
+def _save_dynamic_projects(data: Dict[str, str]) -> None:
+    tmp = _DYNAMIC_PROJECTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _DYNAMIC_PROJECTS_FILE)
+
 
 def init_app_state():
     global _projects, _state_initialized
-    for pid, fp in _parse_projects().items():
+    all_projects = {**_parse_projects(), **_load_dynamic_projects()}
+    success = 0
+    for pid, fp in all_projects.items():
         try:
             _projects[pid] = _init_project(pid, fp)
+            success += 1
         except Exception as e:
             logger.error("初始化 project '%s' 失敗: %s", pid, e, exc_info=True)
     logger.info("✅ 所有 projects 初始化完成：%s", list(_projects.keys()))
-    _state_initialized = True
+    if success > 0 or not all_projects:
+        _state_initialized = True
+    else:
+        logger.error("所有 projects 初始化失敗，下次請求將重新嘗試")
 
 
 def ensure_state():
@@ -404,16 +412,26 @@ def _rebuild_faiss_from_chunk_dicts(
     index_dir: str,
     chunk_dicts: List[Dict],
 ) -> "FAISS":
-    """從 chunk_dicts 重建 FAISS index，清除快取，回傳新 vectorstore。"""
+    """從 chunk_dicts 重建 FAISS index，清除快取，回傳新 vectorstore。
+    使用 tmp 目錄確保失敗時不破壞現有 index。
+    """
     docs = [
         LCDocument(page_content=c["content"], metadata=c.get("metadata") or {})
         for c in chunk_dicts
     ]
+    tmp_dir = index_dir + ".tmp"
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir)
+    os.makedirs(tmp_dir)
+    try:
+        vs = FAISS.from_documents(docs, embeddings)
+        vs.save_local(tmp_dir)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     if os.path.exists(index_dir):
         shutil.rmtree(index_dir)
-    os.makedirs(index_dir)
-    vs = FAISS.from_documents(docs, embeddings)
-    vs.save_local(index_dir)
+    os.rename(tmp_dir, index_dir)
     state.vector_cache.pop(title, None)
     return vs
 
@@ -422,13 +440,24 @@ def _rebuild_faiss_from_chunk_dicts(
 # Flask App
 # =========================
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
+
+_REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
+_rate_limit_storage = "memory://"
+try:
+    import redis as _redis_mod
+    _redis_mod.from_url(_REDIS_URL).ping()
+    _rate_limit_storage = _REDIS_URL
+    logger.info("Rate limiter 使用 Redis: %s", _REDIS_URL)
+except Exception:
+    logger.warning("Redis 連線失敗，rate limiter 改用 memory://（多 worker 下計數不準確）")
 
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=[],
-    storage_uri="memory://",
+    storage_uri=_rate_limit_storage,
 )
 
 
@@ -499,11 +528,12 @@ def health():
     return jsonify({
         "status": "ok",
         "projects": list(_projects.keys()),
-        "time": datetime.utcnow().isoformat(),
+        "time": datetime.now(timezone.utc).isoformat(),
     })
 
 
 @app.get("/api/projects")
+@require_api_key
 def list_projects():
     """列出所有 projects 及其 SOP 清單（含 sop_key）。"""
     ensure_state()
@@ -639,6 +669,11 @@ def create_project():
     state.sop_titles = []
     _projects[project_id] = state
 
+    # 寫入 dynamic_projects.json，確保重啟後仍可載入
+    dynamic = _load_dynamic_projects()
+    dynamic[project_id] = f"{project_id}_index_map.json"
+    _save_dynamic_projects(dynamic)
+
     logger.info("建立新 project: %s", project_id)
     return jsonify({"ok": True, "project_id": project_id}), 201
 
@@ -670,6 +705,13 @@ def delete_project(project_id: str):
         os.remove(state.index_map_file)
 
     del _projects[project_id]
+
+    # 從 dynamic_projects.json 移除
+    dynamic = _load_dynamic_projects()
+    if project_id in dynamic:
+        del dynamic[project_id]
+        _save_dynamic_projects(dynamic)
+
     logger.info("已刪除 project: %s", project_id)
     return jsonify({"ok": True})
 
@@ -748,19 +790,24 @@ def upload_sop(project_id: str):
     else:
         safe_name = _make_safe_name(title)
 
-    # 建立 FAISS index
+    # 建立 FAISS index（使用 tmp 目錄，確保失敗時不破壞現有 index）
     store_dir = abspath_from_base(FAISS_STORE_DIR)
     index_dir = os.path.join(store_dir, safe_name)
+    tmp_dir = index_dir + ".tmp"
     try:
         os.makedirs(store_dir, exist_ok=True)
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        os.makedirs(tmp_dir)
+        vs = FAISS.from_documents(docs, embeddings)
+        vs.save_local(tmp_dir)
+        _save_source(tmp_dir, source_data)
+        _save_chunks(tmp_dir, chunk_dicts)
         if os.path.exists(index_dir):
             shutil.rmtree(index_dir)
-        os.makedirs(index_dir)
-        vs = FAISS.from_documents(docs, embeddings)
-        vs.save_local(index_dir)
-        _save_source(index_dir, source_data)
-        _save_chunks(index_dir, chunk_dicts)
+        os.rename(tmp_dir, index_dir)
     except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         logger.exception("建立 FAISS index 失敗 project=%s title=%s", project_id, title)
         return jsonify({"error": f"建立向量索引失敗：{e}"}), 500
 
@@ -792,6 +839,7 @@ def upload_sop(project_id: str):
 
 
 @app.get("/api/projects/<project_id>/sops/<sop_key>/chunks")
+@require_api_key
 def get_sop_chunks(project_id: str, sop_key: str):
     """列出指定 SOP 的所有 chunks（支援 offset/limit 分頁）。"""
     ensure_state()
