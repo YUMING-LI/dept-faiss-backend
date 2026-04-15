@@ -71,6 +71,9 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(50 * 1024 * 1024)))
 DEBUG = os.getenv("DEBUG", "0").strip() == "1"
 API_TOKEN = os.getenv("API_TOKEN", "").strip()
+REQUIRE_API_TOKEN = os.getenv("REQUIRE_API_TOKEN", "0").strip() == "1"
+if REQUIRE_API_TOKEN and not API_TOKEN:
+    raise RuntimeError("REQUIRE_API_TOKEN=1 但 API_TOKEN 未設定，拒絕啟動")
 
 _raw_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_ORIGINS = _raw_origins or ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
@@ -228,12 +231,22 @@ def _init_project(project_id: str, index_map_file: str) -> ProjectState:
     state.sop_titles = list(state.index_map.keys())
 
     preloaded = 0
+    failed: List[str] = []
     for title in state.sop_titles:
         try:
-            get_vectorstore_for_title(title, state, skip_verify=True)
+            # 不 skip_verify：剛在上方補算/載入 sha256，預載時驗證可在啟動階段
+            # 即時偵測索引被竄改（pickle 反序列化攻擊面），避免 runtime 才爆。
+            get_vectorstore_for_title(title, state, skip_verify=False)
             preloaded += 1
         except Exception:
-            logger.warning("[%s] 預載 FAISS 索引失敗: %s", project_id, title, exc_info=True)
+            failed.append(title)
+            logger.error("[%s] 預載 FAISS 索引失敗: %s", project_id, title, exc_info=True)
+
+    if failed:
+        logger.error(
+            "[%s] %d / %d FAISS 索引預載失敗（這些 SOP 在 runtime 將無法回應）：%s",
+            project_id, len(failed), len(state.sop_titles), failed,
+        )
 
     logger.info("✅ [project=%s] %d SOP indexes loaded, %d preloaded", project_id, len(state.sop_titles), preloaded)
     return state
@@ -444,13 +457,18 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
 
 _REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
+_REQUIRE_REDIS = os.getenv("RATE_LIMIT_REQUIRE_REDIS", "0").strip() == "1"
 _rate_limit_storage = "memory://"
 try:
     import redis as _redis_mod
     _redis_mod.from_url(_REDIS_URL).ping()
     _rate_limit_storage = _REDIS_URL
     logger.info("Rate limiter 使用 Redis: %s", _REDIS_URL)
-except Exception:
+except Exception as _redis_err:
+    if _REQUIRE_REDIS:
+        raise RuntimeError(
+            f"RATE_LIMIT_REQUIRE_REDIS=1 但無法連線 Redis ({_REDIS_URL}): {_redis_err}"
+        )
     logger.warning("Redis 連線失敗，rate limiter 改用 memory://（多 worker 下計數不準確）")
 
 limiter = Limiter(
