@@ -11,3 +11,4 @@ faiss-cpu==1.10.0
 pdfplumber==0.11.4
 gunicorn==23.0.0
 redis==5.2.1
+psycopg2-binary==2.9.10

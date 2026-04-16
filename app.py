@@ -34,6 +34,7 @@ from time import perf_counter
 from datetime import datetime, timezone
 
 import pdfplumber
+from pg_store import pg as _pg
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
@@ -84,6 +85,20 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("ihd-faiss-service")
+
+# PostgreSQL 持久化
+_PG_ENABLED = os.getenv("PG_STORE_ENABLED", "1").strip() == "1"
+if _PG_ENABLED:
+    _pg.init(
+        host=os.getenv("DB_HOST", "10.1.207.19"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        dbname=os.getenv("DB_NAME", "edah_sh"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", ""),
+        sslmode=os.getenv("DB_SSLMODE", "disable"),
+    )
+else:
+    logger.warning("PG_STORE_ENABLED=0，FAISS index 僅存在容器檔案系統（重建後遺失）")
 
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
@@ -276,8 +291,40 @@ def _save_dynamic_projects(data: Dict[str, str]) -> None:
     os.replace(tmp, _DYNAMIC_PROJECTS_FILE)
 
 
+def _restore_from_pg():
+    """從 PG 還原所有 FAISS index 到檔案系統。"""
+    if not _PG_ENABLED:
+        return
+    try:
+        rows = _pg.load_all_sops()
+    except Exception:
+        logger.error("PG load_all_sops 失敗，略過還原", exc_info=True)
+        return
+
+    store_dir = abspath_from_base(FAISS_STORE_DIR)
+    os.makedirs(store_dir, exist_ok=True)
+    restored = 0
+    for row in rows:
+        pid = row["project_id"]
+        title = row["title"]
+        safe_name = row["safe_name"]
+        index_dir = os.path.join(store_dir, safe_name)
+        if os.path.exists(os.path.join(index_dir, "index.faiss")):
+            continue
+        try:
+            _pg.restore_sop_to_dir(pid, title, index_dir)
+            restored += 1
+        except Exception:
+            logger.error("PG 還原失敗 project=%s title=%s", pid, title, exc_info=True)
+    if restored:
+        logger.info("從 PG 還原 %d 筆 FAISS index 到檔案系統", restored)
+
+
 def init_app_state():
     global _projects, _state_initialized
+
+    _restore_from_pg()
+
     all_projects = {**_parse_projects(), **_load_dynamic_projects()}
     success = 0
     for pid, fp in all_projects.items():
@@ -551,7 +598,6 @@ def health():
 
 
 @app.get("/api/projects")
-@require_api_key
 def list_projects():
     """列出所有 projects 及其 SOP 清單（含 sop_key）。"""
     ensure_state()
@@ -692,6 +738,12 @@ def create_project():
     dynamic[project_id] = f"{project_id}_index_map.json"
     _save_dynamic_projects(dynamic)
 
+    if _PG_ENABLED:
+        try:
+            _pg.save_project(project_id, f"{project_id}_index_map.json", is_dynamic=True)
+        except Exception:
+            logger.error("PG save_project 失敗", exc_info=True)
+
     logger.info("建立新 project: %s", project_id)
     return jsonify({"ok": True, "project_id": project_id}), 201
 
@@ -702,8 +754,8 @@ def delete_project(project_id: str):
     """刪除 project（同時刪除 index_map.json 及所有 FAISS index）。"""
     ensure_state()
 
-    if project_id == "default":
-        return jsonify({"error": "不得刪除 default project"}), 400
+    if project_id == "nurse-healthhub":
+        return jsonify({"error": "不得刪除 nurse-healthhub project"}), 400
 
     state = _projects.get(project_id)
     if not state:
@@ -729,6 +781,12 @@ def delete_project(project_id: str):
     if project_id in dynamic:
         del dynamic[project_id]
         _save_dynamic_projects(dynamic)
+
+    if _PG_ENABLED:
+        try:
+            _pg.delete_project(project_id)
+        except Exception:
+            logger.error("PG delete_project 失敗", exc_info=True)
 
     logger.info("已刪除 project: %s", project_id)
     return jsonify({"ok": True})
@@ -847,6 +905,16 @@ def upload_sop(project_id: str):
     # 寫回 index_map.json
     _save_index_map(project_id)
 
+    # 持久化到 PostgreSQL
+    if _PG_ENABLED:
+        try:
+            _pg.save_sop(
+                project_id, title, safe_name, index_dir,
+                len(chunk_dicts), chunk_size, chunk_overlap, sha256,
+            )
+        except Exception:
+            logger.error("PG save_sop 失敗（檔案系統已儲存）", exc_info=True)
+
     logger.info("上傳完成 project=%s title=%s sop_key=%s chunks=%d", project_id, title, safe_name, len(docs))
     return jsonify({
         "ok": True,
@@ -929,6 +997,17 @@ def delete_chunk(project_id: str, sop_key: str, chunk_id: str):
     info["sha256"] = sha256
     _save_index_map(project_id)
 
+    if _PG_ENABLED:
+        try:
+            safe_name = info.get("safe_name", sop_key)
+            _pg.save_sop(
+                project_id, title, safe_name, index_dir,
+                len(new_chunks), info.get("chunk_size", CHUNK_SIZE),
+                info.get("chunk_overlap", CHUNK_OVERLAP), sha256,
+            )
+        except Exception:
+            logger.error("PG save_sop (delete_chunk) 失敗", exc_info=True)
+
     logger.info("刪除 chunk project=%s sop_key=%s chunk_id=%s 剩餘=%d", project_id, sop_key, chunk_id, len(new_chunks))
     return jsonify({"ok": True, "num_chunks": len(new_chunks)})
 
@@ -982,6 +1061,16 @@ def rechunk_sop(project_id: str, sop_key: str):
     info["chunk_overlap"] = chunk_overlap
     _save_index_map(project_id)
 
+    if _PG_ENABLED:
+        try:
+            safe_name = info.get("safe_name", sop_key)
+            _pg.save_sop(
+                project_id, title, safe_name, index_dir,
+                len(chunk_dicts), chunk_size, chunk_overlap, sha256,
+            )
+        except Exception:
+            logger.error("PG save_sop (rechunk) 失敗", exc_info=True)
+
     logger.info(
         "重新切分 project=%s sop_key=%s chunk_size=%d overlap=%d chunks=%d",
         project_id, sop_key, chunk_size, chunk_overlap, len(chunk_dicts),
@@ -1023,6 +1112,12 @@ def delete_sop(project_id: str, sop_key: str):
     state.sop_titles = list(state.index_map.keys())
 
     _save_index_map(project_id)
+
+    if _PG_ENABLED:
+        try:
+            _pg.delete_sop(project_id, title)
+        except Exception:
+            logger.error("PG delete_sop 失敗", exc_info=True)
 
     logger.info("刪除 SOP project=%s title=%s sop_key=%s", project_id, title, sop_key)
     return jsonify({"ok": True, "deleted_title": title})
