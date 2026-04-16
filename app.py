@@ -598,7 +598,6 @@ def health():
 
 
 @app.get("/api/projects")
-@require_api_key
 def list_projects():
     """列出所有 projects 及其 SOP 清單（含 sop_key）。"""
     ensure_state()
