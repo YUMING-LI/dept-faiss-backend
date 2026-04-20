@@ -66,7 +66,7 @@ PROJECTS_RAW = os.getenv("PROJECTS", "default:index_map.json").strip()
 _PROJECT_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]{1,64}$')
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-CHUNK_MODEL = os.getenv("CHUNK_MODEL", "gpt-4o-mini")
+CHUNK_MODEL = os.getenv("CHUNK_MODEL", "gpt-5.4-mini")
 TOP_K = int(os.getenv("TOP_K", "5"))
 _VECTOR_CACHE_MAX = int(os.getenv("VECTOR_CACHE_MAX", "50"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
