@@ -948,7 +948,15 @@ def upload_sop(project_id: str):
                 docs, chunk_dicts = _source_to_chunks_gpt(source_data, title)
                 logger.info("GPT 語意切分完成 project=%s title=%s chunks=%d", project_id, title, len(chunk_dicts))
             except Exception as gpt_err:
-                logger.warning("GPT 切分失敗，fallback 到字數切分 project=%s title=%s err=%s", project_id, title, gpt_err)
+                _err_str = str(gpt_err).lower()
+                if any(k in _err_str for k in ("does not exist", "invalid model", "model_not_found", "no such model")):
+                    logger.warning(
+                        "GPT 切分失敗：CHUNK_MODEL='%s' 可能不存在或名稱有誤，請檢查 env var。"
+                        "fallback 到字數切分 project=%s title=%s err=%s",
+                        CHUNK_MODEL, project_id, title, gpt_err,
+                    )
+                else:
+                    logger.warning("GPT 切分失敗，fallback 到字數切分 project=%s title=%s err=%s", project_id, title, gpt_err)
                 docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
         else:
             docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
@@ -1145,7 +1153,15 @@ def rechunk_sop(project_id: str, sop_key: str):
                 docs, chunk_dicts = _source_to_chunks_gpt(source_data, title)
                 logger.info("GPT 語意切分完成 project=%s sop_key=%s chunks=%d", project_id, sop_key, len(chunk_dicts))
             except Exception as gpt_err:
-                logger.warning("GPT 切分失敗，fallback 到字數切分 sop_key=%s err=%s", sop_key, gpt_err)
+                _err_str = str(gpt_err).lower()
+                if any(k in _err_str for k in ("does not exist", "invalid model", "model_not_found", "no such model")):
+                    logger.warning(
+                        "GPT 切分失敗：CHUNK_MODEL='%s' 可能不存在或名稱有誤，請檢查 env var。"
+                        "fallback 到字數切分 sop_key=%s err=%s",
+                        CHUNK_MODEL, sop_key, gpt_err,
+                    )
+                else:
+                    logger.warning("GPT 切分失敗，fallback 到字數切分 sop_key=%s err=%s", sop_key, gpt_err)
                 docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
         else:
             docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)

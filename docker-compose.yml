@@ -1,6 +1,21 @@
 version: "3.8"
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: shdnetwork-redis
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    networks:
+      web:
+        aliases:
+          - redis
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   ihd-faiss-backend:
     build:
       context: .
@@ -9,6 +24,10 @@ services:
     container_name: ihd-faiss-backend
     env_file:
       - /home/shduser/Docker_static/ihd-faiss-backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
     networks:
       web:
         aliases:
