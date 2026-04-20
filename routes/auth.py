@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from flask import Blueprint, request, jsonify, make_response
 from werkzeug.security import check_password_hash
 import jwt
@@ -5,6 +7,7 @@ import os
 import logging
 import requests as _req
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
 
 bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -65,7 +68,7 @@ def _upstream_headers(token: str) -> dict:
     return {'Authorization': f'Bearer {token}'}
 
 
-def _fetch_upstream_permission(upstream_token: str) -> str | None:
+def _fetch_upstream_permission(upstream_token: str) -> Optional[str]:
     """用 upstream token 查詢使用者的 ihd-faiss project_permission。"""
     for path in ('/api/auth/me', '/api/me', '/api/user/me'):
         try:
@@ -85,7 +88,7 @@ def _fetch_upstream_permission(upstream_token: str) -> str | None:
     return None
 
 
-def _upstream_login(account: str, password: str) -> tuple[str | None, str | None]:
+def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optional[str]]:
     """
     呼叫 upstream 登入 API。
     回傳 (upstream_token, ihd_faiss_permission)，失敗則回傳 (None, None)。
