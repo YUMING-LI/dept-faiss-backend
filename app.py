@@ -596,6 +596,8 @@ CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": ALLOWED_O
 
 from routes.auth import bp as _auth_bp
 app.register_blueprint(_auth_bp)
+from routes.perm import bp as _perm_bp
+app.register_blueprint(_perm_bp)
 
 _REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 _REQUIRE_REDIS = os.getenv("RATE_LIMIT_REQUIRE_REDIS", "0").strip() == "1"
