@@ -916,7 +916,7 @@ def upload_sop(project_id: str):
     chunk_size = max(100, int(request.form.get("chunk_size", CHUNK_SIZE)))
     chunk_overlap = max(0, int(request.form.get("chunk_overlap", CHUNK_OVERLAP)))
     overwrite = request.form.get("overwrite", "").lower() in ("1", "true", "yes")
-    use_gpt_chunker = request.form.get("chunker", "").lower() == "gpt"
+    use_gpt_chunker = request.form.get("chunker", "gpt").lower() != "char"
 
     file_bytes = file.read()
     if len(file_bytes) > MAX_UPLOAD_SIZE:
@@ -1133,7 +1133,7 @@ def rechunk_sop(project_id: str, sop_key: str):
         return jsonify({"error": "找不到原始文字（source.json），請重新上傳文件"}), 404
 
     body = request.get_json(silent=True) or {}
-    use_gpt_chunker = body.get("chunker", "").lower() == "gpt"
+    use_gpt_chunker = body.get("chunker", "gpt").lower() != "char"
     chunk_size = max(100, int(body.get("chunk_size", info.get("chunk_size", CHUNK_SIZE))))
     chunk_overlap = max(0, int(body.get("chunk_overlap", info.get("chunk_overlap", CHUNK_OVERLAP))))
     if not use_gpt_chunker and chunk_overlap >= chunk_size:
