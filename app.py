@@ -643,13 +643,16 @@ def _after(response):
 # API Key 認證
 # =========================
 def _verify_jwt(token: str) -> bool:
-    """回傳 True 若 token 是有效的 manager JWT。"""
+    """回傳 True 若 token 是有效的 ihd-faiss JWT（任何有效 permission）。"""
     secret = os.getenv("JWT_SECRET", "").strip()
     if not secret:
         return False
     try:
         payload = _jwt.decode(token, secret, algorithms=["HS256"])
-        return payload.get("project") == "ihd-faiss" and payload.get("permission") == "manager"
+        return (
+            payload.get("project") == "ihd-faiss" and
+            payload.get("permission") in ("manager", "editor", "viewer")
+        )
     except Exception:
         return False
 
