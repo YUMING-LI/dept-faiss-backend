@@ -17,9 +17,13 @@ REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv('JWT_REFRESH_EXPIRE_DAYS', '7'))
 _COOKIE = 'ihd_refresh_token'
 
 UPSTREAM_BASE_URL = os.getenv('UPSTREAM_BASE_URL', '').rstrip('/')
-UPSTREAM_AUTH_MODE = os.getenv('UPSTREAM_AUTH_MODE', 'bearer').lower()
+# dept-users-service 的 PROJECT env，用來組合路徑 /api/{UPSTREAM_PROJECT}/login
+UPSTREAM_PROJECT = os.getenv('UPSTREAM_PROJECT', 'ihd-dept')
 
 _VALID_PERMISSIONS = ('manager', 'editor', 'viewer')
+
+# 回傳值 sentinel：帳密正確但無 ihd-faiss 權限
+_NO_PERMISSION = 'NO_PERMISSION'
 
 
 def _secret():
@@ -62,43 +66,22 @@ def _set_refresh_cookie(resp, token: str):
     )
 
 
-def _upstream_headers(token: str) -> dict:
-    if UPSTREAM_AUTH_MODE == 'x-access-token':
-        return {'x-access-token': token}
-    return {'Authorization': f'Bearer {token}'}
-
-
-def _fetch_upstream_permission(upstream_token: str) -> Optional[str]:
-    """用 upstream token 查詢使用者的 ihd-faiss project_permission。"""
-    for path in ('/api/auth/me', '/api/me', '/api/user/me'):
-        try:
-            r = _req.get(
-                f'{UPSTREAM_BASE_URL}{path}',
-                headers=_upstream_headers(upstream_token),
-                timeout=8,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                user = data.get('user') or data.get('data') or data
-                pp = user.get('project_permission') or {}
-                if isinstance(pp, dict) and 'ihd-faiss' in pp:
-                    return pp['ihd-faiss']
-        except Exception:
-            pass
-    return None
-
-
 def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    呼叫 upstream 登入 API。
-    回傳 (upstream_token, ihd_faiss_permission)，失敗則回傳 (None, None)。
+    呼叫 dept-users-service 登入 API，以 project=ihd-faiss 查詢 ihd-faiss 權限。
+
+    回傳值：
+      (permission, _)   — perm in _VALID_PERMISSIONS → 登入成功
+      (None, None)      — 帳密錯誤或 upstream 無法連線 → fall through
+      (_NO_PERMISSION, _) — 帳密正確但無 ihd-faiss 權限 → 403
     """
     if not UPSTREAM_BASE_URL:
         return None, None
 
+    url = f'{UPSTREAM_BASE_URL}/api/{UPSTREAM_PROJECT}/login?project=ihd-faiss'
     try:
         resp = _req.post(
-            f'{UPSTREAM_BASE_URL}/api/login',
+            url,
             json={'account': account, 'password': password},
             headers={'Content-Type': 'application/json'},
             timeout=10,
@@ -107,6 +90,12 @@ def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optiona
         logging.warning('Upstream unreachable: %s', e)
         return None, None
 
+    # 帳密正確但無 ihd-faiss 權限 → dept 回 403
+    if resp.status_code == 403:
+        logging.warning("Upstream 403 for '%s': no ihd-faiss permission", account)
+        return _NO_PERMISSION, None
+
+    # 帳密錯誤或其他失敗
     if resp.status_code != 200:
         return None, None
 
@@ -115,27 +104,12 @@ def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optiona
     except Exception:
         return None, None
 
-    # 嘗試多種常見 token 欄位名稱
-    upstream_token = (
-        data.get('token') or
-        data.get('access_token') or
-        (data.get('data') or {}).get('token') or
-        (data.get('data') or {}).get('access_token')
-    )
-
-    # 嘗試從登入回應直接取得 project_permission
-    user_obj = data.get('user') or data.get('data') or {}
+    # 從 user.project_permission 直接取 ihd-faiss 權限
+    user_obj = data.get('user') or {}
     pp = user_obj.get('project_permission') or {}
+    perm = pp.get('ihd-faiss') if isinstance(pp, dict) else None
 
-    if isinstance(pp, dict) and 'ihd-faiss' in pp:
-        return upstream_token, pp['ihd-faiss']
-
-    # 登入回應沒有 project_permission，用 token 額外查詢
-    if upstream_token:
-        perm = _fetch_upstream_permission(upstream_token)
-        return upstream_token, perm
-
-    return None, None
+    return perm, None
 
 
 @bp.route('/login', methods=['POST'])
@@ -149,7 +123,7 @@ def login():
 
     # ── 1. 嘗試 upstream 驗證（dept 使用者）───────────────────────
     if UPSTREAM_BASE_URL:
-        _token, perm = _upstream_login(account_input, password_input)
+        perm, _ = _upstream_login(account_input, password_input)
         if perm and perm in _VALID_PERMISSIONS:
             access, refresh = _generate_tokens(account_input, permission=perm)
             resp = make_response(jsonify({
@@ -159,9 +133,8 @@ def login():
             }), 200)
             _set_refresh_cookie(resp, refresh)
             return resp
-        if _token is not None:
-            # upstream 登入成功，但沒有 ihd-faiss 權限
-            logging.warning("Upstream login ok for '%s' but no ihd-faiss permission", account_input)
+        if perm == _NO_PERMISSION:
+            # 帳密正確但無 ihd-faiss 權限
             return jsonify({'success': False, 'message': '您的帳號沒有 ihd-faiss 存取權限'}), 403
 
     # ── 2. MANAGER_ACCOUNT fallback ─────────────────────────────
