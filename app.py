@@ -940,6 +940,8 @@ def get_sop_chunks(project_id: str, sop_key: str):
     info = state.index_map[title]
     index_dir = abspath_from_base(info.get("index_path", ""))
     all_chunks = _load_chunks(index_dir)
+    if not all_chunks:
+        all_chunks = _pg.get_chunks(project_id, title)
 
     offset = max(0, int(request.args.get("offset", 0)))
     limit = max(1, min(int(request.args.get("limit", 200)), 500))

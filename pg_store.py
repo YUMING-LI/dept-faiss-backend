@@ -162,6 +162,22 @@ class PgStore:
         logger.info("PG restore_sop project=%s title=%s → %s", project_id, title, target_dir)
         return True
 
+    def get_chunks(self, project_id: str, title: str) -> List[Any]:
+        """從 PG 取出指定 SOP 的 chunks 清單；找不到時回傳空清單。"""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT chunks FROM faiss_indexes WHERE project_id=%s AND title=%s",
+                    (project_id, title),
+                )
+                row = cur.fetchone()
+        if not row:
+            return []
+        chunks_json = row[0]
+        if isinstance(chunks_json, list):
+            return chunks_json
+        return json.loads(chunks_json) if chunks_json else []
+
     def delete_sop(self, project_id: str, title: str):
         with self._conn() as conn:
             with conn.cursor() as cur:
