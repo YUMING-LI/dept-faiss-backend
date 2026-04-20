@@ -29,6 +29,7 @@ import functools
 import hmac
 import logging
 import uuid
+import jwt as _jwt
 from typing import Dict, Any, List, Tuple, Optional
 from time import perf_counter
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from openai import OpenAI as _OpenAI
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -65,6 +67,7 @@ PROJECTS_RAW = os.getenv("PROJECTS", "default:index_map.json").strip()
 _PROJECT_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]{1,64}$')
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+CHUNK_MODEL = os.getenv("CHUNK_MODEL", "gpt-5.4-mini")
 TOP_K = int(os.getenv("TOP_K", "5"))
 _VECTOR_CACHE_MAX = int(os.getenv("VECTOR_CACHE_MAX", "50"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
@@ -466,6 +469,94 @@ def _source_to_chunks(
     return lc_docs, chunk_dicts
 
 
+_GPT_CHUNK_SYSTEM = """\
+你是一位醫療 SOP 文件切分專家。
+請將使用者提供的 SOP 全文切分成多個語意完整的 chunk，每個 chunk 須符合：
+1. 涵蓋一個完整概念、程序步驟或段落（例如：目的、適應症、準備事項、執行步驟、注意事項）
+2. 可獨立作為知識庫的一筆查詢條目，不依賴前後文即可理解
+3. 保留原始條列符號、數字序號與表格結構
+4. 長度以 100–600 字為宜；若段落本身較短，可合併至相鄰段落
+
+僅回傳 JSON 陣列，每個元素為一個 chunk 的純文字內容，不要加任何說明文字：
+["chunk 1 內容", "chunk 2 內容", ...]
+"""
+
+
+def _source_to_chunks_gpt(
+    source_data: Dict,
+    title: str,
+) -> Tuple[List[LCDocument], List[Dict]]:
+    """用 GPT 語意切分，失敗時 raise RuntimeError。"""
+    # 組合全文（PDF 依頁次拼接，保留頁碼資訊）
+    if source_data.get("type") == "pdf":
+        pages = source_data.get("pages", [])
+        full_text = "\n\n".join(
+            f"[第 {p['page']} 頁]\n{p['text']}" for p in pages if p.get("text", "").strip()
+        )
+        page_map = {p["page"]: p["text"] for p in pages}
+    else:
+        full_text = source_data.get("text", "")
+        page_map = {}
+
+    if not full_text.strip():
+        raise RuntimeError("文件內容為空，無法切分")
+
+    client = _OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+    response = client.chat.completions.create(
+        model=CHUNK_MODEL,
+        messages=[
+            {"role": "system", "content": _GPT_CHUNK_SYSTEM},
+            {"role": "user", "content": f"SOP 標題：{title}\n\n{full_text}"},
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response.choices[0].message.content or ""
+    # GPT 回傳 {"chunks": [...]} 或直接 [...]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"GPT 回傳非合法 JSON：{e}\n原始內容：{raw[:200]}")
+
+    if isinstance(parsed, list):
+        texts = parsed
+    elif isinstance(parsed, dict):
+        # 取第一個 list 值
+        texts = next((v for v in parsed.values() if isinstance(v, list)), None)
+        if texts is None:
+            raise RuntimeError(f"GPT 回傳 JSON 結構不符預期：{raw[:200]}")
+    else:
+        raise RuntimeError(f"GPT 回傳型別不符：{type(parsed)}")
+
+    texts = [str(t).strip() for t in texts if str(t).strip()]
+    if not texts:
+        raise RuntimeError("GPT 切分結果為空")
+
+    lc_docs: List[LCDocument] = []
+    chunk_dicts: List[Dict] = []
+    for text in texts:
+        # 嘗試找最接近的頁碼（在 PDF 模式下）
+        page = None
+        if page_map:
+            best_overlap = 0
+            for pg, pg_text in page_map.items():
+                overlap = sum(1 for c in text if c in pg_text)
+                if overlap > best_overlap:
+                    best_overlap, page = overlap, pg
+
+        meta = {"sop_title": title, "page": page, "chunker": "gpt"}
+        lc_docs.append(LCDocument(page_content=text, metadata=meta))
+        chunk_dicts.append({
+            "id": str(len(chunk_dicts)),
+            "content": text,
+            "page": page,
+            "metadata": meta,
+        })
+
+    return lc_docs, chunk_dicts
+
+
 def _rebuild_faiss_from_chunk_dicts(
     state: "ProjectState",
     title: str,
@@ -501,7 +592,10 @@ def _rebuild_faiss_from_chunk_dicts(
 # =========================
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
-CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
+CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
+
+from routes.auth import bp as _auth_bp
+app.register_blueprint(_auth_bp)
 
 _REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 _REQUIRE_REDIS = os.getenv("RATE_LIMIT_REQUIRE_REDIS", "0").strip() == "1"
@@ -548,20 +642,39 @@ def _after(response):
 # =========================
 # API Key 認證
 # =========================
+def _verify_jwt(token: str) -> bool:
+    """回傳 True 若 token 是有效的 manager JWT。"""
+    secret = os.getenv("JWT_SECRET", "").strip()
+    if not secret:
+        return False
+    try:
+        payload = _jwt.decode(token, secret, algorithms=["HS256"])
+        return payload.get("project") == "ihd-faiss" and payload.get("permission") == "manager"
+    except Exception:
+        return False
+
+
 def require_api_key(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         if not API_TOKEN:
             return f(*args, **kwargs)
         auth_header = request.headers.get("Authorization", "")
-        token = ""
+        bearer = ""
         if auth_header.startswith("Bearer "):
-            token = auth_header[len("Bearer "):].strip()
-        if not token:
-            token = request.headers.get("X-API-Key", "").strip()
-        if not token or not hmac.compare_digest(token, API_TOKEN):
-            return jsonify({"error": "API 金鑰無效或缺少"}), 401
-        return f(*args, **kwargs)
+            bearer = auth_header[len("Bearer "):].strip()
+        api_key = request.headers.get("X-API-Key", "").strip()
+
+        # Server-to-server: X-API-Key 或 Bearer == API_TOKEN
+        check_token = bearer or api_key
+        if check_token and hmac.compare_digest(check_token, API_TOKEN):
+            return f(*args, **kwargs)
+
+        # 前端登入：Bearer JWT
+        if bearer and _verify_jwt(bearer):
+            return f(*args, **kwargs)
+
+        return jsonify({"error": "API 金鑰無效或缺少"}), 401
     return decorated
 
 
@@ -826,6 +939,7 @@ def upload_sop(project_id: str):
     chunk_size = max(100, int(request.form.get("chunk_size", CHUNK_SIZE)))
     chunk_overlap = max(0, int(request.form.get("chunk_overlap", CHUNK_OVERLAP)))
     overwrite = request.form.get("overwrite", "").lower() in ("1", "true", "yes")
+    use_gpt_chunker = request.form.get("chunker", "gpt").lower() != "char"
 
     file_bytes = file.read()
     if len(file_bytes) > MAX_UPLOAD_SIZE:
@@ -852,7 +966,23 @@ def upload_sop(project_id: str):
         else:
             return jsonify({"error": "僅支援 PDF、TXT、MD 格式"}), 400
 
-        docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
+        if use_gpt_chunker:
+            try:
+                docs, chunk_dicts = _source_to_chunks_gpt(source_data, title)
+                logger.info("GPT 語意切分完成 project=%s title=%s chunks=%d", project_id, title, len(chunk_dicts))
+            except Exception as gpt_err:
+                _err_str = str(gpt_err).lower()
+                if any(k in _err_str for k in ("does not exist", "invalid model", "model_not_found", "no such model")):
+                    logger.warning(
+                        "GPT 切分失敗：CHUNK_MODEL='%s' 可能不存在或名稱有誤，請檢查 env var。"
+                        "fallback 到字數切分 project=%s title=%s err=%s",
+                        CHUNK_MODEL, project_id, title, gpt_err,
+                    )
+                else:
+                    logger.warning("GPT 切分失敗，fallback 到字數切分 project=%s title=%s err=%s", project_id, title, gpt_err)
+                docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
+        else:
+            docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
     except Exception as e:
         logger.exception("文字提取失敗 project=%s title=%s", project_id, title)
         return jsonify({"error": f"文字提取失敗：{e}"}), 500
@@ -940,6 +1070,8 @@ def get_sop_chunks(project_id: str, sop_key: str):
     info = state.index_map[title]
     index_dir = abspath_from_base(info.get("index_path", ""))
     all_chunks = _load_chunks(index_dir)
+    if not all_chunks:
+        all_chunks = _pg.get_chunks(project_id, title)
 
     offset = max(0, int(request.args.get("offset", 0)))
     limit = max(1, min(int(request.args.get("limit", 200)), 500))
@@ -1032,13 +1164,30 @@ def rechunk_sop(project_id: str, sop_key: str):
         return jsonify({"error": "找不到原始文字（source.json），請重新上傳文件"}), 404
 
     body = request.get_json(silent=True) or {}
+    use_gpt_chunker = body.get("chunker", "gpt").lower() != "char"
     chunk_size = max(100, int(body.get("chunk_size", info.get("chunk_size", CHUNK_SIZE))))
     chunk_overlap = max(0, int(body.get("chunk_overlap", info.get("chunk_overlap", CHUNK_OVERLAP))))
-    if chunk_overlap >= chunk_size:
+    if not use_gpt_chunker and chunk_overlap >= chunk_size:
         return jsonify({"error": "chunk_overlap 必須小於 chunk_size"}), 400
 
     try:
-        docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
+        if use_gpt_chunker:
+            try:
+                docs, chunk_dicts = _source_to_chunks_gpt(source_data, title)
+                logger.info("GPT 語意切分完成 project=%s sop_key=%s chunks=%d", project_id, sop_key, len(chunk_dicts))
+            except Exception as gpt_err:
+                _err_str = str(gpt_err).lower()
+                if any(k in _err_str for k in ("does not exist", "invalid model", "model_not_found", "no such model")):
+                    logger.warning(
+                        "GPT 切分失敗：CHUNK_MODEL='%s' 可能不存在或名稱有誤，請檢查 env var。"
+                        "fallback 到字數切分 sop_key=%s err=%s",
+                        CHUNK_MODEL, sop_key, gpt_err,
+                    )
+                else:
+                    logger.warning("GPT 切分失敗，fallback 到字數切分 sop_key=%s err=%s", sop_key, gpt_err)
+                docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
+        else:
+            docs, chunk_dicts = _source_to_chunks(source_data, title, chunk_size, chunk_overlap)
     except Exception as e:
         return jsonify({"error": f"切分失敗：{e}"}), 500
 
