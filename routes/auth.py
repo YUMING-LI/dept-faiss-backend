@@ -68,17 +68,18 @@ def _set_refresh_cookie(resp, token: str):
 
 def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    呼叫 dept-users-service 登入 API，以 project=ihd-faiss 查詢 ihd-faiss 權限。
+    呼叫 dept-users-service 登入 API。
+
+    只有在 UPSTREAM_PROJECT（預設 ihd-dept）擁有 manager 權限的使用者才能登入 ihd-faiss。
 
     回傳值：
-      (permission, _)   — perm in _VALID_PERMISSIONS → 登入成功
-      (None, None)      — 帳密錯誤或 upstream 無法連線 → fall through
-      (_NO_PERMISSION, _) — 帳密正確但無 ihd-faiss 權限 → 403
+      ('manager', _)  — ihd-dept manager → 登入成功
+      (None, None)    — 帳密錯誤、upstream 無法連線或無 manager 權限 → fall through
     """
     if not UPSTREAM_BASE_URL:
         return None, None
 
-    url = f'{UPSTREAM_BASE_URL}/api/{UPSTREAM_PROJECT}/login?project=ihd-faiss'
+    url = f'{UPSTREAM_BASE_URL}/api/{UPSTREAM_PROJECT}/login'
     try:
         resp = _req.post(
             url,
@@ -90,11 +91,6 @@ def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optiona
         logging.warning('Upstream unreachable: %s', e)
         return None, None
 
-    # 帳密正確但無 ihd-faiss 權限 → dept 回 403
-    if resp.status_code == 403:
-        logging.warning("Upstream 403 for '%s': no ihd-faiss permission", account)
-        return _NO_PERMISSION, None
-
     # 帳密錯誤或其他失敗
     if resp.status_code != 200:
         return None, None
@@ -104,12 +100,16 @@ def _upstream_login(account: str, password: str) -> Tuple[Optional[str], Optiona
     except Exception:
         return None, None
 
-    # 從 user.project_permission 直接取 ihd-faiss 權限
+    # 取得 ihd-dept 的 project_permissions
     user_obj = data.get('user') or {}
-    pp = user_obj.get('project_permission') or {}
-    perm = pp.get('ihd-faiss') if isinstance(pp, dict) else None
+    pp = user_obj.get('project_permissions') or {}
+    dept_perm = pp.get(UPSTREAM_PROJECT) if isinstance(pp, dict) else None
 
-    return perm, None
+    if dept_perm != 'manager':
+        logging.warning("Upstream login '%s': %s permission='%s', not manager", account, UPSTREAM_PROJECT, dept_perm)
+        return _NO_PERMISSION, None
+
+    return 'manager', None
 
 
 @bp.route('/login', methods=['POST'])
@@ -134,8 +134,8 @@ def login():
             _set_refresh_cookie(resp, refresh)
             return resp
         if perm == _NO_PERMISSION:
-            # 帳密正確但無 ihd-faiss 權限
-            return jsonify({'success': False, 'message': '您的帳號沒有 ihd-faiss 存取權限'}), 403
+            # 帳密正確但非 manager
+            return jsonify({'success': False, 'message': '您的帳號沒有 manager 存取權限'}), 403
 
     # ── 2. MANAGER_ACCOUNT fallback ─────────────────────────────
     manager_account = os.getenv('MANAGER_ACCOUNT', '').strip()
