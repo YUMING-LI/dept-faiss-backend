@@ -29,7 +29,6 @@ import functools
 import hmac
 import logging
 import uuid
-import jwt as _jwt
 from typing import Dict, Any, List, Tuple, Optional
 from time import perf_counter
 from datetime import datetime, timezone
@@ -594,8 +593,6 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
 
-from routes.auth import bp as _auth_bp
-app.register_blueprint(_auth_bp)
 from routes.perm import bp as _perm_bp
 app.register_blueprint(_perm_bp)
 
@@ -644,21 +641,6 @@ def _after(response):
 # =========================
 # API Key 認證
 # =========================
-def _verify_jwt(token: str) -> bool:
-    """回傳 True 若 token 是有效的 ihd-faiss JWT（任何有效 permission）。"""
-    secret = os.getenv("JWT_SECRET", "").strip()
-    if not secret:
-        return False
-    try:
-        payload = _jwt.decode(token, secret, algorithms=["HS256"])
-        return (
-            payload.get("project") == "ihd-faiss" and
-            payload.get("permission") in ("manager", "editor", "viewer")
-        )
-    except Exception:
-        return False
-
-
 def require_api_key(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
@@ -669,16 +651,9 @@ def require_api_key(f):
         if auth_header.startswith("Bearer "):
             bearer = auth_header[len("Bearer "):].strip()
         api_key = request.headers.get("X-API-Key", "").strip()
-
-        # Server-to-server: X-API-Key 或 Bearer == API_TOKEN
         check_token = bearer or api_key
         if check_token and hmac.compare_digest(check_token, API_TOKEN):
             return f(*args, **kwargs)
-
-        # 前端登入：Bearer JWT
-        if bearer and _verify_jwt(bearer):
-            return f(*args, **kwargs)
-
         return jsonify({"error": "API 金鑰無效或缺少"}), 401
     return decorated
 

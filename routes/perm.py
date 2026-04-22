@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
+import hmac
 import logging
 import functools
 import requests as _req
 from flask import Blueprint, request, jsonify
-import jwt
 
 bp = Blueprint('perm', __name__, url_prefix='/api/admin')
 
@@ -14,21 +14,19 @@ UPSTREAM_PROJECT  = os.getenv('UPSTREAM_PROJECT', 'ihd-dept')
 
 
 def _require_manager(f):
-    """Decorator: 要求 ihd-faiss manager JWT"""
+    """Decorator: 要求 API_TOKEN（X-API-Key 或 Bearer）"""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
+        api_token = os.getenv('API_TOKEN', '').strip()
+        if not api_token:
+            return f(*args, **kwargs)
         auth = request.headers.get('Authorization', '')
-        if not auth.startswith('Bearer '):
-            return jsonify({'success': False, 'message': '未授權'}), 401
-        token = auth[7:]
-        secret = os.getenv('JWT_SECRET', '').strip()
-        try:
-            payload = jwt.decode(token, secret, algorithms=['HS256'])
-            if payload.get('project') != 'ihd-faiss' or payload.get('permission') != 'manager':
-                return jsonify({'success': False, 'message': '需要 manager 權限'}), 403
-        except Exception:
-            return jsonify({'success': False, 'message': '無效的 Token'}), 401
-        return f(*args, **kwargs)
+        bearer = auth[7:].strip() if auth.startswith('Bearer ') else ''
+        api_key = request.headers.get('X-API-Key', '').strip()
+        check = bearer or api_key
+        if check and hmac.compare_digest(check, api_token):
+            return f(*args, **kwargs)
+        return jsonify({'success': False, 'message': '未授權'}), 401
     return decorated
 
 
