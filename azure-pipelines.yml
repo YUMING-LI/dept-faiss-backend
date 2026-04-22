@@ -14,7 +14,7 @@ jobs:
     demands:
       - agent.name -equals uxshdap01
   steps:
-  - script: docker compose build --pull=false && docker compose up -d --force-recreate
+  - script: docker compose build --pull=false && docker rm -f ihd-faiss-backend 2>/dev/null || true && docker compose up -d
     displayName: 'Deploy to Primary Host'
 
 - job: RunOnDevAgent
@@ -25,7 +25,7 @@ jobs:
     demands:
       - agent.name -equals uxshdap02
   steps:
-  - script: docker compose build --pull=false && docker compose up -d --force-recreate
+  - script: docker compose build --pull=false && docker rm -f ihd-faiss-backend 2>/dev/null || true && docker compose up -d
     displayName: 'Run rebuild (dev)'
 
 - job: RunOnStagingAgent
@@ -41,5 +41,5 @@ jobs:
       and(succeeded('DeployPrimary'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     )
   steps:
-  - script: docker compose build --pull=false && docker compose up -d --force-recreate
+  - script: docker compose build --pull=false && docker rm -f ihd-faiss-backend 2>/dev/null || true && docker compose up -d
     displayName: 'Run rebuild (staging)'
