@@ -26,6 +26,9 @@ services:
       - /home/shduser/Docker_static/ihd-faiss-backend/.env
     environment:
       - REDIS_URL=redis://redis:6379
+      - RSA_DIR=/app/secret/rsa
+    volumes:
+      - /home/shduser/Docker_static/dept/secret:/app/secret:ro
     depends_on:
       - redis
     networks:

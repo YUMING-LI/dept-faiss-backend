@@ -5,6 +5,7 @@ import hmac
 import logging
 import functools
 import requests as _req
+import jwt
 from flask import Blueprint, request, jsonify
 
 bp = Blueprint('perm', __name__, url_prefix='/api/admin')
@@ -12,21 +13,40 @@ bp = Blueprint('perm', __name__, url_prefix='/api/admin')
 UPSTREAM_BASE_URL = os.getenv('UPSTREAM_BASE_URL', '').rstrip('/')
 UPSTREAM_PROJECT  = os.getenv('UPSTREAM_PROJECT', 'ihd-dept')
 
+_PUBLIC_KEY = None
+_rsa_dir = os.getenv('RSA_DIR', '')
+if _rsa_dir:
+    try:
+        with open(os.path.join(_rsa_dir, 'public_key.pem'), 'rb') as _f:
+            _PUBLIC_KEY = _f.read()
+    except FileNotFoundError:
+        pass
+
 
 def _require_manager(f):
-    """Decorator: 要求 API_TOKEN（X-API-Key 或 Bearer）"""
+    """Decorator: 要求 ihd-faiss manager（RS256 JWT 或 API_TOKEN）"""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        api_token = os.getenv('API_TOKEN', '').strip()
-        if not api_token:
-            return f(*args, **kwargs)
         auth = request.headers.get('Authorization', '')
         bearer = auth[7:].strip() if auth.startswith('Bearer ') else ''
         api_key = request.headers.get('X-API-Key', '').strip()
+        api_token = os.getenv('API_TOKEN', '').strip()
+
+        # API_TOKEN bypass（server-to-server）
         check = bearer or api_key
-        if check and hmac.compare_digest(check, api_token):
+        if api_token and check and hmac.compare_digest(check, api_token):
             return f(*args, **kwargs)
-        return jsonify({'success': False, 'message': '未授權'}), 401
+
+        # RS256 JWT from dept-users-service
+        if bearer and _PUBLIC_KEY:
+            try:
+                payload = jwt.decode(bearer, _PUBLIC_KEY, algorithms=['RS256'])
+                if payload.get('project') == 'ihd-faiss' and payload.get('permission') == 'manager':
+                    return f(*args, **kwargs)
+            except Exception:
+                pass
+
+        return jsonify({'success': False, 'message': '未授權，需要 ihd-faiss manager 權限'}), 401
     return decorated
 
 

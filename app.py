@@ -29,6 +29,7 @@ import functools
 import hmac
 import logging
 import uuid
+import jwt as _jwt
 from typing import Dict, Any, List, Tuple, Optional
 from time import perf_counter
 from datetime import datetime, timezone
@@ -641,6 +642,30 @@ def _after(response):
 # =========================
 # API Key 認證
 # =========================
+_PUBLIC_KEY = None
+_rsa_dir = os.getenv("RSA_DIR", "")
+if _rsa_dir:
+    try:
+        with open(os.path.join(_rsa_dir, "public_key.pem"), "rb") as _f:
+            _PUBLIC_KEY = _f.read()
+        logger.info("RSA public key loaded from %s", _rsa_dir)
+    except FileNotFoundError:
+        logger.warning("RSA public key not found at %s", _rsa_dir)
+
+
+def _verify_jwt(token: str) -> bool:
+    if not _PUBLIC_KEY:
+        return False
+    try:
+        payload = _jwt.decode(token, _PUBLIC_KEY, algorithms=["RS256"])
+        return (
+            payload.get("project") == "ihd-faiss" and
+            payload.get("permission") in ("manager", "editor", "viewer")
+        )
+    except Exception:
+        return False
+
+
 def require_api_key(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
@@ -653,6 +678,8 @@ def require_api_key(f):
         api_key = request.headers.get("X-API-Key", "").strip()
         check_token = bearer or api_key
         if check_token and hmac.compare_digest(check_token, API_TOKEN):
+            return f(*args, **kwargs)
+        if bearer and _verify_jwt(bearer):
             return f(*args, **kwargs)
         return jsonify({"error": "API 金鑰無效或缺少"}), 401
     return decorated
